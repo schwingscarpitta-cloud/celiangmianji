@@ -104,7 +104,6 @@
 
         .btn:active { transform: scale(0.98); }
         .btn-primary { background: #2E7D32; color: white; }
-        .btn-secondary { background: #f0f0f0; color: #333; }
         .btn-danger { background: #FF5252; color: white; }
         .btn-success { background: #4CAF50; color: white; }
 
@@ -174,33 +173,6 @@
             color: white;
         }
 
-        /* 轨迹记录状态 */
-        .tracking-status {
-            position: absolute;
-            top: 60px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(76, 175, 80, 0.9);
-            color: white;
-            padding: 8px 20px;
-            border-radius: 20px;
-            font-size: 14px;
-            z-index: 1001;
-            display: none;
-        }
-
-        .tracking-status.active {
-            display: block;
-            animation: pulse 1.5s infinite;
-        }
-
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.7; }
-            100% { opacity: 1; }
-        }
-
-        /* GPS精度显示 */
         .gps-info {
             position: absolute;
             left: 16px;
@@ -223,16 +195,41 @@
         .gps-dot.good { background: #4CAF50; }
         .gps-dot.medium { background: #FF9800; }
         .gps-dot.bad { background: #FF5252; }
+
+        /* 缩放按钮 */
+        .zoom-btns {
+            position: absolute;
+            right: 16px;
+            bottom: 290px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            z-index: 1000;
+        }
+
+        .zoom-btn {
+            width: 40px;
+            height: 40px;
+            background: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 20px;
+            cursor: pointer;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>📐 地图测面积</h1>
-        <button class="header-btn" onclick="clearPoints()">🗑 清空</button>
+        <button class="header-btn" onclick="clearAll()">🗑 清空</button>
     </div>
 
     <div id="map"></div>
-    <div class="tracking-status" id="trackingStatus">🔄 正在记录轨迹...</div>
+    <div class="zoom-btns">
+        <button class="zoom-btn" onclick="zoomIn()">+</button>
+        <button class="zoom-btn" onclick="zoomOut()">−</button>
+    </div>
     <div class="gps-info" id="gpsInfo"></div>
     <button class="location-btn" onclick="goToLocation()">📍</button>
 
@@ -244,7 +241,7 @@
         </div>
 
         <div class="panel-header">
-            <span class="panel-title">已标记 <span id="pointNum">0</span> 个点</span>
+            <span class="panel-title">已记录 <span id="pointNum">0</span> 个点</span>
             <span class="point-badge" id="areaDisplay">-- 亩</span>
         </div>
 
@@ -264,8 +261,8 @@
         </div>
 
         <div class="btn-row">
-            <button class="btn btn-danger" onclick="undoPoint()">↩ 撤销</button>
-            <button class="btn btn-success" id="startWalkBtn" onclick="startWalking()">🚶 开始绕地走</button>
+            <button class="btn btn-danger" onclick="clearAll()">🗑 清空</button>
+            <button class="btn btn-success" id="startWalkBtn" onclick="toggleWalking()">🚶 开始绕地走</button>
             <button class="btn btn-primary" onclick="calculate()">📐 计算面积</button>
         </div>
     </div>
@@ -276,16 +273,19 @@
 
     <script>
         let map, polygon, rectGraphic, walkPath, walkMarkers;
+        let satelliteLayer, labelLayer;
         let points = [];
         let markers = [];
         let muFactor = 666.6667;
-        let currentMode = 'walk'; // point/walk/rect
+        let currentMode = 'walk';
         let isWalking = false;
         let watchId = null;
-        let walkPoints = [];
-        let startPoint = null;
+        let rawWalkPoints = [];
+        let processedWalkPoints = [];
         let isDrawing = false;
         let drawStart = null;
+        let lastRecordTime = 0;
+        let lastRecordPoint = null;
 
         const resultMu = document.getElementById('resultMu');
         const resultM2 = document.getElementById('resultM2');
@@ -294,7 +294,6 @@
         const pointNum = document.getElementById('pointNum');
         const toast = document.getElementById('toast');
         const hintText = document.getElementById('hintText');
-        const trackingStatus = document.getElementById('trackingStatus');
         const gpsInfo = document.getElementById('gpsInfo');
         const startWalkBtn = document.getElementById('startWalkBtn');
         const tabPoint = document.getElementById('tabPoint');
@@ -306,17 +305,30 @@
             map = L.map('map', {
                 zoomControl: false,
                 attributionControl: false,
-                maxZoom: 19,
+                maxZoom: 22,
                 minZoom: 3
             });
 
             map.setView([34.5, 113.5], 17);
 
-            L.tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}', {
+            // 高德卫星图
+            satelliteLayer = L.tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}', {
                 subdomains: '1234',
-                maxZoom: 19,
-                minZoom: 3
-            }).addTo(map);
+                maxZoom: 20,
+                minZoom: 3,
+                zIndex: 1
+            });
+            satelliteLayer.addTo(map);
+
+            // 高德标注图层（显示地名、路名）
+            labelLayer = L.tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}', {
+                subdomains: '1234',
+                maxZoom: 20,
+                minZoom: 3,
+                zIndex: 2,
+                opacity: 0.6
+            });
+            labelLayer.addTo(map);
 
             map.on('click', handleMapClick);
             map.on('mousedown', handleMouseDown);
@@ -326,9 +338,20 @@
             goToLocation();
         }
 
+        // 放大
+        function zoomIn() {
+            const zoom = map.getZoom();
+            map.setZoom(zoom + 1);
+        }
+
+        // 缩小
+        function zoomOut() {
+            const zoom = map.getZoom();
+            map.setZoom(zoom - 1);
+        }
+
         // 设置模式
         function setMode(mode) {
-            // 如果正在走路，停止
             if (isWalking) {
                 stopWalking();
             }
@@ -342,7 +365,7 @@
                 hintText.textContent = '点击地图标记角点';
                 startWalkBtn.style.display = 'none';
             } else if (mode === 'walk') {
-                hintText.textContent = '拿着手机绕地块走一圈';
+                hintText.textContent = '拿着手机绕地块走一圈，点击"开始"后开始记录';
                 startWalkBtn.style.display = 'block';
                 startWalkBtn.textContent = '🚶 开始绕地走';
             } else if (mode === 'rect') {
@@ -351,25 +374,30 @@
             }
         }
 
-        // 开始绕地走
-        function startWalking() {
+        // 切换行走记录
+        function toggleWalking() {
             if (isWalking) {
                 stopWalking();
-                return;
+            } else {
+                startWalking();
             }
+        }
 
-            // 清空之前的
-            clearPoints();
-
+        // 开始绕地走
+        function startWalking() {
+            clearAll();
             isWalking = true;
-            walkPoints = [];
+            rawWalkPoints = [];
+            processedWalkPoints = [];
+
             startWalkBtn.textContent = '⏹ 停止记录';
             startWalkBtn.classList.remove('btn-success');
             startWalkBtn.classList.add('btn-danger');
-            trackingStatus.classList.add('active');
-            hintText.textContent = '请拿着手机绕地块走一圈，走回起点附近自动结束';
+            hintText.textContent = '绕地块走一圈后，点击"停止记录"';
 
-            // 使用高精度 GPS
+            lastRecordTime = 0;
+            lastRecordPoint = null;
+
             if (navigator.geolocation) {
                 watchId = navigator.geolocation.watchPosition(
                     function(pos) {
@@ -377,74 +405,146 @@
                         const lng = pos.coords.longitude;
                         const accuracy = pos.coords.accuracy;
 
-                        // 显示 GPS 精度
                         updateGpsInfo(accuracy);
 
-                        // 精度大于 50 米时不记录
-                        if (accuracy > 50) {
-                            showToast('GPS精度较差，请到开阔地带', 'error');
+                        if (accuracy > 30) {
                             return;
                         }
 
                         const latlng = L.latLng(lat, lng);
+                        const now = Date.now();
 
-                        // 记录轨迹点
-                        walkPoints.push(latlng);
-
-                        // 绘制轨迹线
-                        if (walkPath) {
-                            map.removeLayer(walkPath);
-                        }
-                        walkPath = L.polyline(walkPoints, {
-                            color: '#4CAF50',
-                            weight: 4,
-                            opacity: 0.8
-                        }).addTo(map);
-
-                        // 添加轨迹点标记
-                        const marker = L.circleMarker(latlng, {
-                            radius: 4,
-                            fillColor: '#4CAF50',
-                            color: '#fff',
-                            weight: 1,
-                            fillOpacity: 1
-                        }).addTo(map);
-
-                        if (!walkMarkers) walkMarkers = [];
-                        walkMarkers.push(marker);
-
-                        // 检查是否回到起点
-                        if (walkPoints.length > 10 && startPoint) {
-                            const dist = map.distance(latlng, startPoint);
-                            // 如果距离起点小于 15 米，自动结束
-                            if (dist < 15) {
-                                finishWalking();
+                        if (lastRecordPoint) {
+                            const dist = map.distance(latlng, lastRecordPoint);
+                            if (dist < 2 || now - lastRecordTime < 1000) {
+                                return;
                             }
                         }
 
-                        // 第一次记录时保存起点
-                        if (!startPoint) {
-                            startPoint = latlng;
-                        }
+                        rawWalkPoints.push({ latlng: latlng, time: now, accuracy: accuracy });
+                        lastRecordPoint = latlng;
+                        lastRecordTime = now;
 
-                        // 实时计算面积
-                        if (walkPoints.length >= 3) {
-                            const area = calcAreaFromPoints(walkPoints);
+                        processWalkPath();
+
+                        pointNum.textContent = processedWalkPoints.length;
+
+                        if (processedWalkPoints.length >= 3) {
+                            const area = calcAreaFromPoints(processedWalkPoints);
                             areaDisplay.textContent = (area / muFactor).toFixed(2) + ' 亩';
                         }
                     },
                     function(err) {
-                        showToast('GPS获取失败: ' + err.message, 'error');
+                        showToast('GPS错误: ' + err.message, 'error');
                     },
                     {
                         enableHighAccuracy: true,
-                        maximumAge: 1000,
+                        maximumAge: 0,
                         timeout: 10000
                     }
                 );
             } else {
-                showToast('您的设备不支持GPS', 'error');
+                showToast('设备不支持GPS', 'error');
             }
+        }
+
+        // 处理轨迹
+        function processWalkPath() {
+            if (rawWalkPoints.length < 2) return;
+
+            let filtered = rawWalkPoints.filter((p, i) => {
+                if (i === 0 || i === rawWalkPoints.length - 1) return true;
+                const dist = map.distance(p.latlng, rawWalkPoints[0].latlng);
+                return dist > 5;
+            });
+
+            if (filtered.length < 3) return;
+
+            if (filtered.length > 100) {
+                processedWalkPoints = douglasPeucker(
+                    filtered.map(p => p.latlng),
+                    3
+                );
+            } else {
+                processedWalkPoints = filtered.map(p => p.latlng);
+            }
+
+            if (walkPath) {
+                map.removeLayer(walkPath);
+            }
+
+            if (walkMarkers) {
+                walkMarkers.forEach(m => map.removeLayer(m));
+            }
+
+            walkPath = L.polyline(processedWalkPoints, {
+                color: '#4CAF50',
+                weight: 3,
+                opacity: 0.9
+            }).addTo(map);
+
+            walkMarkers = [];
+            if (processedWalkPoints.length > 0) {
+                const startMarker = L.circleMarker(processedWalkPoints[0], {
+                    radius: 8,
+                    fillColor: '#2196F3',
+                    color: '#fff',
+                    weight: 2,
+                    fillOpacity: 1
+                }).addTo(map);
+                startMarker.bindTooltip('起点', { permanent: false });
+                walkMarkers.push(startMarker);
+
+                const endMarker = L.circleMarker(processedWalkPoints[processedWalkPoints.length - 1], {
+                    radius: 8,
+                    fillColor: '#FF5252',
+                    color: '#fff',
+                    weight: 2,
+                    fillOpacity: 1
+                }).addTo(map);
+                endMarker.bindTooltip('终点', { permanent: false });
+                walkMarkers.push(endMarker);
+            }
+        }
+
+        // 道格拉斯-普克算法
+        function douglasPeucker(points, tolerance) {
+            if (points.length < 3) return points;
+
+            let maxDist = 0;
+            let index = 0;
+            const first = points[0];
+            const last = points[points.length - 1];
+
+            for (let i = 1; i < points.length - 1; i++) {
+                const dist = perpendicularDistance(points[i], first, last);
+                if (dist > maxDist) {
+                    maxDist = dist;
+                    index = i;
+                }
+            }
+
+            if (maxDist > tolerance) {
+                const left = douglasPeucker(points.slice(0, index + 1), tolerance);
+                const right = douglasPeucker(points.slice(index), tolerance);
+                return left.slice(0, -1).concat(right);
+            } else {
+                return [first, last];
+            }
+        }
+
+        function perpendicularDistance(point, lineStart, lineEnd) {
+            const x0 = point.lat;
+            const y0 = point.lng;
+            const x1 = lineStart.lat;
+            const y1 = lineStart.lng;
+            const x2 = lineEnd.lat;
+            const y2 = lineEnd.lng;
+
+            const d = Math.sqrt((y2 - y1) * (y2 - y1) + (x2 - x1) * (x2 - x1));
+            if (d === 0) return map.distance(point, lineStart);
+
+            return Math.abs((y2 - y1) * x0 - (x2 - x1) * y0 + x2 * y1 - y2 * x1) / d * 111320;
         }
 
         // 停止记录
@@ -457,35 +557,17 @@
             startWalkBtn.textContent = '🚶 开始绕地走';
             startWalkBtn.classList.remove('btn-danger');
             startWalkBtn.classList.add('btn-success');
-            trackingStatus.classList.remove('active');
             gpsInfo.innerHTML = '';
-        }
 
-        // 完成绕地走
-        function finishWalking() {
-            stopWalking();
-
-            if (walkPoints.length < 3) {
-                showToast('轨迹点太少，请重新走', 'error');
-                return;
+            if (processedWalkPoints.length >= 3) {
+                hintText.textContent = '记录完成！可以点击计算或重新测量';
+                showToast('记录完成', 'success');
+            } else {
+                hintText.textContent = '记录点太少，请重新测量';
             }
-
-            // 将轨迹点转换为测量点
-            points = [...walkPoints];
-            pointNum.textContent = points.length;
-
-            // 绘制多边形
-            drawPolygon();
-
-            // 显示面积
-            const area = calcAreaFromPoints(walkPoints);
-            areaDisplay.textContent = (area / muFactor).toFixed(2) + ' 亩';
-
-            hintText.textContent = '绕地走完成！点击计算或继续调整';
-            showToast('测量完成！', 'success');
         }
 
-        // 更新 GPS 信息显示
+        // 更新GPS信息
         function updateGpsInfo(accuracy) {
             let dotClass = 'bad';
             let text = '精度: ' + Math.round(accuracy) + '米';
@@ -539,7 +621,7 @@
             const drawEnd = e.latlng;
             const bounds = L.latLngBounds(drawStart, drawEnd);
 
-            clearPoints();
+            clearAll();
 
             const sw = bounds.getSouthWest();
             const ne = bounds.getNorthEast();
@@ -561,14 +643,6 @@
 
         // 添加点
         function addPoint(latlng) {
-            if (points.length >= 3) {
-                let dist = map.distance(latlng, points[0]);
-                if (dist < 8) {
-                    calculate();
-                    return;
-                }
-            }
-
             points.push(latlng);
 
             const marker = L.circleMarker(latlng, {
@@ -583,7 +657,7 @@
 
             const labelIcon = L.divIcon({
                 className: 'point-label',
-                html: '<span style="color:white;font-size:10px;font-weight:bold;text-shadow:0 0 2px #000,0 0 2px #000;">' + points.length + '</span>',
+                html: '<span style="color:white;font-size:10px;font-weight:bold;text-shadow:0 0 2px #000;">' + points.length + '</span>',
                 iconSize: [20, 20],
                 iconAnchor: [10, 10]
             });
@@ -623,33 +697,8 @@
             }).addTo(map);
         }
 
-        // 撤销
-        function undoPoint() {
-            if (points.length > 0) {
-                points.pop();
-                const markerObj = markers.pop();
-                if (markerObj) {
-                    map.removeLayer(markerObj.group);
-                }
-
-                pointNum.textContent = points.length;
-                drawPolygon();
-
-                if (points.length < 3) {
-                    areaDisplay.textContent = '-- 亩';
-                } else {
-                    let area = calcAreaFromPoints(points);
-                    areaDisplay.textContent = (area / muFactor).toFixed(2) + ' 亩';
-                }
-
-                resultMu.textContent = '--';
-                resultM2.textContent = '--';
-                resultPeri.textContent = '--';
-            }
-        }
-
         // 清空
-        function clearPoints() {
+        function clearAll() {
             points = [];
             markers.forEach(m => map.removeLayer(m.group));
             markers = [];
@@ -671,8 +720,8 @@
                 rectGraphic = null;
             }
 
-            startPoint = null;
-            walkPoints = [];
+            rawWalkPoints = [];
+            processedWalkPoints = [];
 
             pointNum.textContent = '0';
             areaDisplay.textContent = '-- 亩';
@@ -683,13 +732,15 @@
 
         // 计算
         function calculate() {
-            if (points.length < 3) {
-                showToast('请至少标记3个点', 'error');
+            const calcPoints = isWalking ? processedWalkPoints : points;
+
+            if (calcPoints.length < 3) {
+                showToast('请先测量至少3个点', 'error');
                 return;
             }
 
-            let area = calcAreaFromPoints(points);
-            let peri = calcPerimeter();
+            let area = calcAreaFromPoints(calcPoints);
+            let peri = calcPerimeter(calcPoints);
 
             resultMu.textContent = (area / muFactor).toFixed(3);
             resultM2.textContent = area.toFixed(1);
@@ -722,16 +773,14 @@
         }
 
         // 计算周长
-        function calcPerimeter() {
-            if (points.length < 2) return 0;
+        function calcPerimeter(pts) {
+            if (pts.length < 2) return 0;
 
             let peri = 0;
-            for (let i = 1; i < points.length; i++) {
-                peri += map.distance(points[i-1], points[i]);
+            for (let i = 1; i < pts.length; i++) {
+                peri += map.distance(pts[i-1], pts[i]);
             }
-            if (points.length >= 2) {
-                peri += map.distance(points[points.length-1], points[0]);
-            }
+            peri += map.distance(pts[pts.length-1], pts[0]);
             return peri;
         }
 
@@ -741,11 +790,8 @@
                 navigator.geolocation.getCurrentPosition(
                     function(pos) {
                         map.setView([pos.coords.latitude, pos.coords.longitude], 18);
-                        showToast('已定位到您的位置', 'success');
                     },
-                    function(err) {
-                        console.log('定位失败:', err.message);
-                    }
+                    function(err) {}
                 );
             }
         }
@@ -757,7 +803,6 @@
             setTimeout(() => { toast.className = 'toast'; }, 2500);
         }
 
-        // 启动
         window.onload = initMap;
     </script>
 </body>
